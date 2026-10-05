@@ -1,10 +1,11 @@
 """宠物词条抽取：按权重轮盘抽词条，连续没出稀有就保底。
 
-缺陷：权重不参与（永远取权重最大的那一条）、保底不生效、种子被时间戳顶掉（不可复现）、
-同一个 req_id 重复生效、每次抽取全扫词条表。
+轮盘在初始化时预处理成前缀和，单次抽取摊还 O(1)；随机源只用 seed，
+同一个 req_id 只抽一次，重复调用返回上次结果且不推进保底计数。
 """
 
-import time
+import bisect
+import random
 
 
 def load_traits(path):
@@ -28,19 +29,38 @@ class Roller:
         self.miss = 0
         self.seen = {}
         self.scanned = 0
+        self._rng = random.Random(seed)
+        self._prefix = []
+        self._rare_prefix = []
+        total = 0
+        rare_total = 0
+        for item in traits:
+            self.scanned += 1
+            total += int(item["weight"])
+            self._prefix.append(total)
+            if int(item["rare"]):
+                rare_total += int(item["weight"])
+            self._rare_prefix.append(rare_total)
+        self._total = total
+        self._rare_total = rare_total
+
+    def _draw(self, prefix, total):
+        return bisect.bisect_right(prefix, self._rng.randrange(total))
 
     def roll(self, req_id):
-        """抽一条词条。缺陷：权重不参与、保底不生效、种子换成时间戳、不查 req、全扫词条表。"""
-        self.scanned += len(self.traits)
-        best = None
-        for item in self.traits:
-            if best is None or int(item["weight"]) > int(best["weight"]):
-                best = item
-        picked = best["trait"]
-        if int(best["rare"]):
+        """抽一条词条：权重轮盘 + 保底 + req_id 幂等。"""
+        if req_id in self.seen:
+            return self.seen[req_id]
+        self.scanned += 1
+        if self.miss >= self.pity_limit and self._rare_total > 0:
+            index = self._draw(self._rare_prefix, self._rare_total)
+        else:
+            index = self._draw(self._prefix, self._total)
+        item = self.traits[index]
+        picked = item["trait"]
+        if int(item["rare"]):
             self.miss = 0
         else:
             self.miss += 1
-        self.seed = int(time.time() * 1000) % 100000
         self.seen[req_id] = picked
         return picked
